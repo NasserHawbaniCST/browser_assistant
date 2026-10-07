@@ -1,5 +1,8 @@
 # Portainer: Stacks > Add stack > Repository, compose path "docker-compose.yml".
-# Set BROWSER_TOKEN in the environment variables of the stack (the same value in Odoo).
+# Environment variables of the stack:
+#   BROWSER_TOKEN  a long secret (the same value in Odoo)
+#   ODOO_NETWORK   the Docker network of the Odoo container (Portainer > Containers > odoo > Networks):
+#                  Odoo then reaches the service at http://cs-browser:8000
 services:
   browser:
     build: .
@@ -16,3 +19,11 @@ services:
       BROWSER_IDLE_MINUTES: ${BROWSER_IDLE_MINUTES:-15}
     init: true
     mem_limit: 2g
+    networks:
+      - default
+      - odoo
+
+networks:
+  odoo:
+    external: true
+    name: ${ODOO_NETWORK:-odoo_default}

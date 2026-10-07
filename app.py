@@ -11,7 +11,14 @@ Endpoints (all but /health need "Authorization: Bearer <BROWSER_TOKEN>"):
   POST   /v1/sessions/{id}/screenshot     {"full_page"}                       ->  {"png": base64, ...}
   POST   /v1/sessions/{id}/login          {"url", "db", "login", "password"}   ->  the page + logged_in
   POST   /v1/sessions/{id}/act            {"action", "ref", "text", "allow_changes"} -> the page after it
+  GET    /v1/sessions/{id}/frame                                              ->  image/jpeg of the screen now
+  POST   /v1/sessions/{id}/human          {"action": "click|type|key|scroll", "x", "y", "text", "key"}
+                                          the consultant drives the browser himself (e.g. to sign in): his
+                                          input never goes to the AI, and changes stay blocked as for the AI
   DELETE /v1/sessions/{id}
+
+The pages show a visible mouse pointer (it moves to each control before the click, and a ring marks the
+click) so the live view and the screenshots show what the assistant does.
 
 Changes are blocked unless allowed: on Odoo sites every call that is not a read (save, confirm, delete,
 buttons, server actions, messages...) is refused while "allow_changes" is not given for the action
@@ -36,7 +43,7 @@ import json
 from typing import Literal
 from urllib.parse import urlencode, urlparse
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
@@ -79,6 +86,48 @@ RISKY_WORDS = re.compile(
     r'دفع|سداد|موافقة|رفض|تثبيت|استيراد|دمج|نشر|تسوية|إقفال|اقفال', re.I)
 KEYS = {'Enter', 'Escape', 'Tab', 'ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp',
         'Home', 'End', 'Backspace'}
+
+# A visible mouse pointer: headless Chromium has none. It follows the real mouse events of the page,
+# keeps its place across pages, and a ring marks each click.
+CURSOR_JS = r"""(() => {
+  if (window.__csCursor) return;
+  window.__csCursor = true;
+  const KEY = '__cs_cursor_pos';
+  let pos = {x: 40, y: 40};
+  try { pos = JSON.parse(sessionStorage.getItem(KEY)) || pos; } catch (e) {}
+  let el = null;
+  const draw = () => {
+    if (!document.body) return null;
+    if (!el || !el.isConnected) {
+      el = document.createElement('div');
+      el.id = '__cs_cursor';
+      el.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24"><path d="M3 2l7 19 2.6-7.6L20 11z" '
+        + 'fill="#e8344e" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+      el.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none;'
+        + 'filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));transition:transform .08s linear;';
+      document.body.appendChild(el);
+    }
+    el.style.transform = 'translate(' + (pos.x - 3) + 'px,' + (pos.y - 2) + 'px)';
+    return el;
+  };
+  addEventListener('mousemove', (e) => {
+    pos = {x: e.clientX, y: e.clientY};
+    try { sessionStorage.setItem(KEY, JSON.stringify(pos)); } catch (err) {}
+    draw();
+  }, true);
+  addEventListener('mousedown', (e) => {
+    if (!document.body) return;
+    const ring = document.createElement('div');
+    ring.style.cssText = 'position:fixed;z-index:2147483646;pointer-events:none;width:34px;height:34px;'
+      + 'border-radius:50%;border:3px solid #e8344e;background:rgba(232,52,78,.18);left:' + (e.clientX - 17)
+      + 'px;top:' + (e.clientY - 17) + 'px;transition:transform .6s ease-out,opacity .6s ease-out;';
+    document.body.appendChild(ring);
+    requestAnimationFrame(() => { ring.style.transform = 'scale(1.9)'; ring.style.opacity = '0'; });
+    setTimeout(() => ring.remove(), 900);
+  }, true);
+  document.addEventListener('DOMContentLoaded', draw);
+  setInterval(draw, 1000);  // pages that replace the whole body
+})();"""
 
 DESCRIBE_JS = r"""(el) => {
   const b = el.closest('button, a, [role=button], [role=menuitem]') || el;
@@ -161,6 +210,7 @@ class Session:
         self.applied_changes = []
         self.lock = asyncio.Lock()
         self.used = time.monotonic()
+        self.frame = None
 
     def _change(self, request, path):
         """The change a POST request makes (None for a read)."""
@@ -288,6 +338,17 @@ class Login(BaseModel):
     password: str
 
 
+class Human(BaseModel):
+    action: Literal['click', 'type', 'key', 'scroll']
+    x: float = 0
+    y: float = 0
+    text: str = Field('', max_length=500)
+    key: str = ''
+
+
+HUMAN_KEYS = KEYS | {'Delete', 'Space'}
+
+
 class Act(BaseModel):
     action: Literal['click', 'type', 'select', 'press']
     ref: int | None = None
@@ -377,6 +438,7 @@ async def new_session(body: NewSession):
         service_workers='block')
     session = Session(context, allowed)
     await context.route('**/*', session.guard)
+    await context.add_init_script(CURSOR_JS)
     context.on('page', session.on_page)
     session.on_page(await context.new_page())
     STATE['sessions'][session.id] = session
@@ -500,10 +562,16 @@ async def act(sid: str, body: Act):
             raise HTTPException(400, 'Key not allowed: %s (allowed: %s)' % (body.text, ', '.join(sorted(KEYS))))
         session.allow_changes = body.allow_changes
         try:
+            if target is not None:
+                await _move_to(page, target)
             if body.action == 'click':
                 await target.click(timeout=15000)
             elif body.action == 'type':
-                await target.fill(body.text, timeout=15000)
+                if len(body.text) <= 80:  # typed as a user does: visible in the live view
+                    await target.fill('', timeout=15000)
+                    await target.press_sequentially(body.text, delay=35, timeout=15000)
+                else:
+                    await target.fill(body.text, timeout=15000)
                 if body.submit:
                     await target.press('Enter')
             elif body.action == 'select':
@@ -521,6 +589,75 @@ async def act(sid: str, body: Act):
         if session.blocked_changes:
             await _close_block_dialogs(page)
         return await _read(session)
+
+
+async def _move_to(page, target):
+    """Move the visible pointer to the control, as a hand would, before acting on it."""
+    try:
+        await target.scroll_into_view_if_needed(timeout=5000)
+        box = await target.bounding_box()
+        if box:
+            await page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2, steps=18)
+            await page.wait_for_timeout(120)
+    except PlaywrightError:
+        pass  # the action itself reports a real problem
+
+
+@app.post('/v1/sessions/{sid}/human', dependencies=[Depends(authorized)])
+async def human(sid: str, body: Human):
+    """Input of the consultant in the live view (click on the picture, typing): e.g. he signs in himself.
+    It may type a password (it goes straight to the page); it is never sent back."""
+    session = _session(sid)
+    async with session.lock:
+        page = session.page
+        if not page or page.is_closed():
+            raise HTTPException(409, 'No page is open.')
+        x = min(max(body.x, 0), SCREEN['width'] - 1)
+        y = min(max(body.y, 0), SCREEN['height'] - 1)
+        try:
+            if body.action == 'click':
+                await page.mouse.move(x, y, steps=8)
+                await page.mouse.click(x, y)
+            elif body.action == 'type':
+                # The text replaces the content of the field clicked (e.g. a login already filled in)
+                await page.evaluate("() => { const el = document.activeElement;"
+                                    " if (el && el.select && /^(INPUT|TEXTAREA)$/.test(el.tagName)) el.select(); }")
+                await page.keyboard.type(body.text, delay=15)
+            elif body.action == 'key':
+                if body.key not in HUMAN_KEYS:
+                    raise HTTPException(400, 'Key not allowed: %s' % body.key)
+                await page.keyboard.press(' ' if body.key == 'Space' else body.key)
+            else:
+                await page.mouse.wheel(0, max(min(body.y, 2000), -2000))
+            try:
+                await page.wait_for_load_state('domcontentloaded', timeout=4000)
+            except PlaywrightTimeout:
+                pass
+            await page.wait_for_timeout(250)
+        except PlaywrightError as e:
+            raise HTTPException(422, 'The action failed: %s' % str(e).splitlines()[0][:300]) from e
+        if session.blocked_changes:
+            await _close_block_dialogs(page)
+        session.blocked_changes.clear()
+        return {'url': page.url, 'title': await page.title()}
+
+
+@app.get('/v1/sessions/{sid}/frame', dependencies=[Depends(authorized)])
+async def frame(sid: str):
+    """What the browser shows now (live view): taken on demand, the last one when the page is busy."""
+    session = STATE['sessions'].get(sid)
+    if not session:
+        raise HTTPException(404, 'Browser session expired.')
+    page = session.page
+    if page and not page.is_closed() and page.url != 'about:blank' \
+            and _host_allowed(urlparse(page.url).hostname, session.allowed):
+        try:
+            session.frame = await page.screenshot(type='jpeg', quality=60, timeout=4000, animations='allow')
+        except PlaywrightError:
+            pass
+    if not session.frame:
+        return Response(status_code=204)
+    return Response(session.frame, media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
 
 
 @app.delete('/v1/sessions/{sid}', dependencies=[Depends(authorized)])
