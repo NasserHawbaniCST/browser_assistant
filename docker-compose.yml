@@ -7,6 +7,8 @@ services:
   browser:
     build: .
     image: cs-browser-service:latest
+    # Rebuilt from the repository files at every deploy (otherwise the old image is reused)
+    pull_policy: build
     container_name: cs-browser
     restart: unless-stopped
     ports:
