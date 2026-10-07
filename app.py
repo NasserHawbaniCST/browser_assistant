@@ -55,6 +55,8 @@ IDLE_SECONDS = int(os.environ.get('BROWSER_IDLE_MINUTES', '15')) * 60
 NAV_TIMEOUT = int(os.environ.get('BROWSER_TIMEOUT', '45')) * 1000
 MAX_TEXT = int(os.environ.get('BROWSER_MAX_TEXT', '20000'))
 MAX_ELEMENTS = 150
+# Features of this version, checked by Odoo: 1 open/read/screenshot, 2 login/act, 3 live frame + human control
+API_VERSION = 3
 SCREEN = {'width': 1440, 'height': 900}
 BLOCK_MARK = 'Blocked by the AI assistant'
 
@@ -421,7 +423,7 @@ async def health():
     status = 'ok' if browser and browser.is_connected() else 'degraded'
     if not TOKEN:
         status = 'token missing: set BROWSER_TOKEN in the stack environment variables'
-    return {'status': status, 'chromium': browser.version if browser else '',
+    return {'status': status, 'api_version': API_VERSION, 'chromium': browser.version if browser else '',
             'sessions': len(STATE['sessions']), 'max_sessions': MAX_SESSIONS}
 
 
