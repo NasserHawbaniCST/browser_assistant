@@ -42,7 +42,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 
-TOKEN = os.environ.get('BROWSER_TOKEN') or os.environ.get('DOCSERVICE_TOKEN', '')
+TOKEN = os.environ.get('BROWSER_TOKEN', '')
 MAX_SESSIONS = int(os.environ.get('BROWSER_MAX_SESSIONS', '6'))
 IDLE_SECONDS = int(os.environ.get('BROWSER_IDLE_MINUTES', '15')) * 60
 NAV_TIMEOUT = int(os.environ.get('BROWSER_TIMEOUT', '45')) * 1000
@@ -359,7 +359,7 @@ async def health():
     browser = STATE.get('browser')
     status = 'ok' if browser and browser.is_connected() else 'degraded'
     if not TOKEN:
-        status = 'token missing: set BROWSER_TOKEN (or DOCSERVICE_TOKEN) in the stack environment variables'
+        status = 'token missing: set BROWSER_TOKEN in the stack environment variables'
     return {'status': status, 'chromium': browser.version if browser else '',
             'sessions': len(STATE['sessions']), 'max_sessions': MAX_SESSIONS}
 

@@ -1,0 +1,18 @@
+# Portainer: Stacks > Add stack > Repository, compose path "docker-compose.yml".
+# Set BROWSER_TOKEN in the environment variables of the stack (the same value in Odoo).
+services:
+  browser:
+    build: .
+    image: cs-browser-service:latest
+    container_name: cs-browser
+    restart: unless-stopped
+    ports:
+      # Open to the Odoo server only (firewall), or behind a reverse proxy
+      - "${BROWSER_PORT:-8687}:8000"
+    environment:
+      # Empty: the stack still deploys, but every request is refused until the token is set
+      BROWSER_TOKEN: ${BROWSER_TOKEN:-}
+      BROWSER_MAX_SESSIONS: ${BROWSER_MAX_SESSIONS:-6}
+      BROWSER_IDLE_MINUTES: ${BROWSER_IDLE_MINUTES:-15}
+    init: true
+    mem_limit: 2g
