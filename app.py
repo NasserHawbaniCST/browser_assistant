@@ -215,6 +215,7 @@ class Session:
         self.lock = asyncio.Lock()
         self.used = time.monotonic()
         self.frame = None
+        self.frame_live = False
 
     def _change(self, request, path):
         """The change a POST request makes (None for a read)."""
@@ -273,6 +274,35 @@ class Session:
         page._cs_ready = True
         page.on('dialog', lambda dialog: asyncio.ensure_future(_dismiss(dialog)))
         page.set_default_timeout(NAV_TIMEOUT)
+        asyncio.ensure_future(self._screencast(page))
+
+    async def _screencast(self, page):
+        """Chromium pushes a frame each time the screen changes: the live view reads the latest one at
+        once, instead of a screenshot per request (slow, and stuck while a page loads)."""
+        try:
+            cdp = await page.context.new_cdp_session(page)
+        except PlaywrightError:
+            return
+
+        def on_frame(params):
+            if page is self.page:
+                self.frame = base64.b64decode(params['data'])
+                self.frame_live = True
+            asyncio.ensure_future(_ack(cdp, params['sessionId']))
+
+        cdp.on('Page.screencastFrame', on_frame)
+        try:
+            await cdp.send('Page.startScreencast', {'format': 'jpeg', 'quality': 55, 'everyNthFrame': 1,
+                                                    'maxWidth': SCREEN['width'], 'maxHeight': SCREEN['height']})
+        except PlaywrightError:
+            pass
+
+
+async def _ack(cdp, frame_session):
+    try:
+        await cdp.send('Page.screencastFrameAck', {'sessionId': frame_session})
+    except PlaywrightError:
+        pass
 
 
 async def _dismiss(dialog):
@@ -653,10 +683,13 @@ async def frame(sid: str):
     if not session:
         raise HTTPException(404, 'Browser session expired.')
     page = session.page
-    if page and not page.is_closed() and page.url != 'about:blank' \
-            and _host_allowed(urlparse(page.url).hostname, session.allowed):
+    shown = page and not page.is_closed() and page.url != 'about:blank' \
+        and _host_allowed(urlparse(page.url).hostname, session.allowed)
+    if not shown:
+        return Response(status_code=204)
+    if not session.frame_live:  # no frame pushed yet (just opened): one screenshot
         try:
-            session.frame = await page.screenshot(type='jpeg', quality=60, timeout=4000, animations='allow')
+            session.frame = await page.screenshot(type='jpeg', quality=55, timeout=4000, animations='allow')
         except PlaywrightError:
             pass
     if not session.frame:
