@@ -69,7 +69,9 @@ READ_METHODS = {
     'check_access_rights', 'check_access_rule', 'get_formview_id', 'get_formview_action',
     'get_empty_list_help', 'systray_get_activities', 'web_name_search', 'name_search_by_code',
 }
-READ_PREFIXES = ('get_', 'read_', 'search_', 'retrieve_', 'web_search', 'web_read', 'fetch_', 'check_')
+READ_PREFIXES = ('get_', 'read_', 'search_', 'retrieve_', 'web_search', 'web_read', 'fetch_', 'check_', 'has_')
+# Writes of the web client that only keep a display preference or a "seen" mark: not data of the customer
+HARMLESS_METHODS = {'set_res_users_settings', 'channel_fetched', 'set_last_seen_message', 'channel_set_last_seen'}
 # Other POST routes of the web client that only read (or log in)
 READ_ROUTES = (
     '/web/login', '/web/action/load', '/web/session/get_session_info', '/web/session/check',
@@ -224,7 +226,7 @@ class Session:
             except (ValueError, AttributeError):
                 params = {}
             method = params.get('method') or path.rstrip('/').split('/')[-1]
-            if method in READ_METHODS or method.startswith(READ_PREFIXES):
+            if method in READ_METHODS or method in HARMLESS_METHODS or method.startswith(READ_PREFIXES):
                 return None
             return '%s.%s' % (params.get('model') or '?', method)
         if path.startswith(READ_ROUTES):
@@ -243,7 +245,7 @@ class Session:
                     self.blocked_changes.append(change)
                     if parsed.path.startswith(RPC_ROUTES):  # the Odoo client shows it as a normal error
                         return await route.fulfill(status=200, content_type='application/json', body=json.dumps({
-                            'jsonrpc': '2.0', 'id': None, 'error': {'code': 200, 'message': 'Odoo Server Error', 'data': {
+                            'jsonrpc': '2.0', 'id': None, 'error': {'code': 200, 'message': BLOCK_MARK, 'data': {
                                 'name': 'odoo.exceptions.UserError', 'debug': '', 'arguments': [], 'context': {},
                                 'message': '%s: changes need the approval of the consultant.' % BLOCK_MARK}}}))
                     return await route.abort('blockedbyclient')
