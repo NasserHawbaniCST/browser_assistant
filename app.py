@@ -355,6 +355,33 @@ app = FastAPI(title='CS Browser Service', version='1.0', docs_url=None, redoc_ur
 class NewSession(BaseModel):
     allowed_hosts: list[str] = Field(min_length=1)
     locale: str = 'ar-SA'
+    timezone: str = 'UTC'
+
+
+VALID_TIMEZONES = {'UTC'}
+
+
+async def _checked_timezone(name):
+    """The time zone if Chromium knows it (checked once on a blank page), else UTC."""
+    name = _timezone(name)
+    if name in VALID_TIMEZONES:
+        return name
+    context = None
+    try:
+        context = await STATE['browser'].new_context(timezone_id=name)
+        await context.new_page()
+        VALID_TIMEZONES.add(name)
+        return name
+    except PlaywrightError:
+        return 'UTC'
+    finally:
+        if context:
+            await context.close()
+
+
+def _timezone(name):
+    """An IANA time zone name (the screens show the dates as the Odoo user sees them); Chromium checks it."""
+    return name if re.match(r'^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$', name or '') else 'UTC'
 
 
 class OpenPage(BaseModel):
@@ -468,8 +495,8 @@ async def new_session(body: NewSession):
         oldest = min(STATE['sessions'].values(), key=lambda s: s.used)
         await _close(oldest.id)
     context = await STATE['browser'].new_context(
-        viewport=SCREEN, locale=body.locale, accept_downloads=False, ignore_https_errors=False,
-        service_workers='block')
+        viewport=SCREEN, locale=body.locale, timezone_id=await _checked_timezone(body.timezone),
+        accept_downloads=False, ignore_https_errors=False, service_workers='block')
     session = Session(context, allowed)
     await context.route('**/*', session.guard)
     await context.add_init_script(CURSOR_JS)
@@ -584,7 +611,7 @@ async def act(sid: str, body: Act):
                 raise HTTPException(400, 'ref is required: the number of the control in the last read.')
             target = page.locator('[data-cs-ref="%d"]' % body.ref).first
             if not await target.count():
-                raise HTTPException(404, 'Control %s is not on the page anymore: read the page again.' % body.ref)
+                raise HTTPException(409, 'Control %s is not on the page anymore: read the page again.' % body.ref)
             control = await target.evaluate(DESCRIBE_JS)
             if body.action == 'type' and control['input_type'] == 'password':
                 raise HTTPException(403, 'The assistant never types passwords.')
